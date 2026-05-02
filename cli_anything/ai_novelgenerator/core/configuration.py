@@ -33,6 +33,8 @@ EMBEDDING_DEFAULTS = {
     "interface_format": "OpenAI",
 }
 
+REDACTED = "[redacted]"
+
 
 def load_config_file(config_path: str) -> dict:
     with open(config_path, "r", encoding="utf-8") as handle:
@@ -55,7 +57,7 @@ def save_config_file(config_data: dict, config_path: str) -> dict:
 def config_summary(config_path: str) -> dict:
     config = load_config_file(config_path)
     return {
-        "config_path": os.path.abspath(config_path),
+        "config_path": _safe_path_label(config_path),
         "llm_profiles": sorted(config["llm_configs"].keys()),
         "embedding_profiles": sorted(config["embedding_configs"].keys()),
         "choose_configs": _normalized_choose_configs(config),
@@ -67,13 +69,13 @@ def list_profiles(config_path: str, profile_type: str) -> dict:
     section_name = _section_name(profile_type)
     profiles = config[section_name]
     return {
-        "config_path": os.path.abspath(config_path),
+        "config_path": _safe_path_label(config_path),
         "profile_type": profile_type,
         "profile_count": len(profiles),
         "profiles": [
             {
                 "name": name,
-                "config": deepcopy(value),
+                "config": redact_profile(deepcopy(value)),
                 "is_selected": _profile_is_selected(config, profile_type, name),
                 "selected_slots": _selected_slots(config, profile_type, name),
             }
@@ -87,10 +89,10 @@ def get_profile(config_path: str, profile_type: str, name: str) -> dict:
     section = _profiles_section(config, profile_type)
     profile_name = _require_profile(section, name, profile_type)
     return {
-        "config_path": os.path.abspath(config_path),
+        "config_path": _safe_path_label(config_path),
         "profile_type": profile_type,
         "name": profile_name,
-        "config": deepcopy(section[profile_name]),
+        "config": redact_profile(deepcopy(section[profile_name])),
         "is_selected": _profile_is_selected(config, profile_type, profile_name),
         "selected_slots": _selected_slots(config, profile_type, profile_name),
     }
@@ -169,10 +171,10 @@ def delete_profile(config_path: str, profile_type: str, name: str) -> dict:
     removed = deepcopy(section.pop(profile_name))
     save_config_file(config, config_path)
     return {
-        "config_path": os.path.abspath(config_path),
+        "config_path": _safe_path_label(config_path),
         "profile_type": profile_type,
         "name": profile_name,
-        "config": removed,
+        "config": redact_profile(removed),
         "deleted": True,
     }
 
@@ -181,8 +183,32 @@ def show_choose_configs(config_path: str) -> dict:
     config = load_config_file(config_path)
     choose = _normalized_choose_configs(config)
     return {
-        "config_path": os.path.abspath(config_path),
+        "config_path": _safe_path_label(config_path),
         "choose_configs": choose,
+    }
+
+
+def redact_profile(profile: dict) -> dict:
+    redacted = deepcopy(profile)
+    if "api_key" in redacted:
+        redacted["api_key"] = _mask_secret(redacted.get("api_key"))
+    return redacted
+
+
+def redact_runtime_config(runtime: dict) -> dict:
+    payload = deepcopy(runtime)
+    for key, value in payload.items():
+        if isinstance(value, dict):
+            payload[key] = redact_profile(value)
+    return payload
+
+
+def safe_config_reference(config_path: str) -> dict:
+    absolute = os.path.abspath(config_path)
+    return {
+        "config_file": os.path.basename(absolute),
+        "config_dir": os.path.dirname(absolute),
+        "config_path": _safe_path_label(absolute),
     }
 
 
@@ -284,3 +310,17 @@ def _require_profile(section: dict, name: str, profile_type: str) -> str:
     if profile_name not in section:
         raise RuntimeError(f"{profile_type} profile not found: {profile_name}")
     return profile_name
+
+
+def _safe_path_label(path: str) -> str:
+    absolute = os.path.abspath(path)
+    return os.path.join("...", os.path.basename(os.path.dirname(absolute)), os.path.basename(absolute))
+
+
+def _mask_secret(value) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    if len(text) <= 4:
+        return REDACTED
+    return f"{text[:2]}***{text[-2:]}"

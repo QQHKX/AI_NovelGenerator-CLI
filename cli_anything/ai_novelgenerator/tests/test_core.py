@@ -138,13 +138,16 @@ def test_session_undo_and_redo_restore_project(tmp_path):
 def test_export_bundle_writes_valid_zip(tmp_path):
     project_path, workspace, project = make_project(tmp_path)
     (workspace / "Novel_architecture.txt").write_text("arch", encoding="utf-8")
+    (workspace / ".env").write_text("API_KEY=secret-value", encoding="utf-8")
     bundle = tmp_path / "bundle.zip"
     result = export_mod.export_bundle(project, str(project_path), str(bundle), overwrite=True)
     assert bundle.exists()
     assert result["format"] == "zip"
+    assert result["skipped_sensitive_files"] == [".env"]
     with zipfile.ZipFile(bundle) as archive:
         assert "manifest.json" in archive.namelist()
         assert "project.json" in archive.namelist()
+        assert "workspace/.env" not in archive.namelist()
 
 
 def test_project_compat_wrappers_return_expected_metadata(tmp_path):
@@ -280,6 +283,10 @@ def test_config_profile_crud_and_choose_persist_to_json(tmp_path):
     assert "MockEmbedding2" not in reloaded["embedding_configs"]
     assert reloaded["choose_configs"]["architecture_llm"] == "MockLLM"
     assert reloaded["choose_configs"]["embedding"] == "MockEmbedding"
+
+    shown = configuration_mod.get_profile(str(config_path), "llm", "MockLLM")
+    assert shown["config"]["api_key"] != "mock"
+    assert "***" in shown["config"]["api_key"] or shown["config"]["api_key"] == "[redacted]"
 
 
 def test_config_rename_updates_selected_choose_slots(tmp_path):
@@ -508,7 +515,62 @@ def test_review_consistency_includes_plot_arcs_context(tmp_path, monkeypatch):
     assert result["plot_arcs_path"].endswith("plot_arcs.txt")
     assert captured["plot_arcs"] == "未解决：密钥去向"
     assert result["result"] == "ok"
+    assert "role_checks" in result
+    assert "theme_checks" in result
     monkeypatch.setattr(modules["consistency_checker"], "check_consistency", original)
+
+
+def test_review_consistency_reports_role_and_theme_warnings(tmp_path):
+    _, workspace, project = make_project(tmp_path)
+    generation_mod.generate_architecture(project)
+    generation_mod.generate_blueprint(project)
+    chapter_path = workspace / "chapters" / "chapter_1.txt"
+    chapter_path.parent.mkdir(exist_ok=True)
+    chapter_path.write_text("无关章节内容", encoding="utf-8")
+    project["chapter_defaults"]["characters_involved"] = "林雾,沈砚"
+    result = review_mod.review_consistency(project, 1)
+    assert result["role_checks"]["missing_role_definitions"] == ["林雾", "沈砚"]
+    assert result["theme_checks"]["warnings"]
+
+
+def test_generate_blueprint_rejects_incomplete_numbering(tmp_path):
+    _, workspace, project = make_project(tmp_path)
+    generation_mod.generate_architecture(project)
+    (workspace / "Novel_directory.txt").write_text(
+        "第1章 - [章节1]\n本章定位：[开端]\n\n第3章 - [章节3]\n本章定位：[推进]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="Missing: 2"):
+        generation_mod.validate_blueprint(project, require_complete=True)
+
+
+def test_generate_chapter_rejects_missing_blueprint_chapter(tmp_path):
+    _, workspace, project = make_project(tmp_path)
+    generation_mod.generate_architecture(project)
+    (workspace / "Novel_directory.txt").write_text(
+        "第1章 - [章节1]\n本章定位：[开端]\n\n第2章 - [章节2]\n本章定位：[推进]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="Chapter 3 is not present in the blueprint"):
+        generation_mod.generate_chapter(project, 3)
+
+
+def test_export_manuscript_writes_combined_markdown(tmp_path):
+    _, workspace, project = make_project(tmp_path)
+    generation_mod.generate_architecture(project)
+    generation_mod.generate_blueprint(project)
+    chapters = workspace / "chapters"
+    chapters.mkdir(exist_ok=True)
+    (chapters / "chapter_1.txt").write_text("第1章内容", encoding="utf-8")
+    (chapters / "chapter_2.txt").write_text("第2章内容", encoding="utf-8")
+    (chapters / "chapter_3.txt").write_text("第3章内容", encoding="utf-8")
+    output = tmp_path / "manuscript.md"
+    result = export_mod.export_manuscript(project, str(output), overwrite=True, format_name="md")
+    assert result["preset"] == "manuscript"
+    text = output.read_text(encoding="utf-8")
+    assert "# unit-test" in text
+    assert "## 第1章 章节1" in text
+    assert "第3章内容" in text
 
 
 def test_batch_generate_chapters_can_finalize_range(tmp_path):
@@ -586,14 +648,14 @@ def test_batch_generate_chapters_can_auto_enrich_low_word_drafts(tmp_path, monke
     original_generate = generation_mod.generate_chapter
     original_enrich = generation_mod.enrich_chapter
 
-    def fake_generate(project_data, chapter_number, custom_prompt=None):
-        result = original_generate(project_data, chapter_number, custom_prompt=custom_prompt)
+    def fake_generate(project_data, chapter_number, custom_prompt=None, progress_callback=None):
+        result = original_generate(project_data, chapter_number, custom_prompt=custom_prompt, progress_callback=progress_callback)
         Path(result["chapter_path"]).write_text("短稿", encoding="utf-8")
         result["text"] = "短稿"
         result["word_count"] = 2
         return result
 
-    def fake_enrich(project_data, chapter_number):
+    def fake_enrich(project_data, chapter_number, progress_callback=None):
         chapter_path = Path(project_data["workspace_dir"]) / "chapters" / f"chapter_{chapter_number}.txt"
         chapter_path.write_text("扩写后章节内容", encoding="utf-8")
         return {
@@ -683,7 +745,7 @@ def test_chapter_status_and_scan_report_missing_draft_finalized(tmp_path):
         "第2章 - [章节2]\n本章定位：[推进]\n\n第3章 - [章节3]\n本章定位：[收束]\n",
         encoding="utf-8",
     )
-    generation_mod.generate_chapter(project, 1)
+    workspace_mod.write_chapter_text(project, 1, "第1章草稿")
     generation_mod.generate_chapter(project, 2)
     generation_mod.finalize_chapter(project, 2)
 

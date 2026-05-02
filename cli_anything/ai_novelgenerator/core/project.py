@@ -12,6 +12,7 @@ import os
 import time
 from pathlib import Path
 
+from cli_anything.ai_novelgenerator.core import configuration as configuration_mod
 from cli_anything.ai_novelgenerator.core import generation as generation_mod
 from cli_anything.ai_novelgenerator.core import roles as roles_mod
 
@@ -240,7 +241,7 @@ def project_status(project: dict) -> dict:
     result = {
         "name": project["name"],
         "workspace_dir": workspace,
-        "config_path": project["config_path"],
+        "config": configuration_mod.safe_config_reference(project["config_path"]),
         "source_root": project["source_root"],
         "parameters": project["parameters"],
         "profiles": project["profiles"],
@@ -312,6 +313,8 @@ def save(project: dict, project_path: str) -> dict:
 def info(project: dict, project_path: str | None = None) -> dict:
     """Return project metadata plus resolved status and optional path."""
     payload = dict(project)
+    payload["config"] = configuration_mod.safe_config_reference(project["config_path"])
+    payload.pop("config_path", None)
     if project_path:
         payload["project_path"] = os.path.abspath(project_path)
     payload["status"] = project_status(project)

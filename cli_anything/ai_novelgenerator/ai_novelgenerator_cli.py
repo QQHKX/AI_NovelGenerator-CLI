@@ -26,6 +26,22 @@ _json_output = False
 _repl_mode = False
 
 
+def _emit_progress(scope: str, step: str, current: int | None = None, total: int | None = None):
+    if current is not None and total is not None:
+        _echo_text_safe(f"[{scope}] {current}/{total} {step}", err=True)
+        return
+    _echo_text_safe(f"[{scope}] {step}", err=True)
+
+
+def _progress_event(**event):
+    _emit_progress(
+        event.get("scope", "task"),
+        event.get("step", "processing"),
+        current=event.get("current"),
+        total=event.get("total"),
+    )
+
+
 def _echo_text_safe(text: str, err: bool = False):
     try:
         click.echo(text, err=err)
@@ -229,8 +245,8 @@ def config_show(project_path, config_path):
         _emit(configuration_mod.config_summary(_config_path_from(project_path, config_path)))
         return
     _, project_data = _load_project(project_path)
-    runtime = get_runtime_config(project_data)
-    runtime["config_path"] = os.path.abspath(project_data["config_path"])
+    runtime = configuration_mod.redact_runtime_config(get_runtime_config(project_data))
+    runtime.update(configuration_mod.safe_config_reference(project_data["config_path"]))
     runtime["choose_configs"] = configuration_mod.show_choose_configs(project_data["config_path"])["choose_configs"]
     _emit(runtime)
 
@@ -441,11 +457,12 @@ def generate():
 @click.option("--project", "project_path", type=click.Path())
 def generate_architecture(project_path):
     project_path, project_data = _load_project(project_path)
+    _emit_progress("generate:architecture", "Starting generation")
     result = _mutate_project(
         project_path,
         project_data,
         "generate architecture",
-        lambda p: generation_mod.generate_architecture(p),
+        lambda p: generation_mod.generate_architecture(p, progress_callback=_progress_event),
     )
     project_data.setdefault("last_outputs", {}).update(result)
     project_mod.save_project(project_data, project_path)
@@ -455,11 +472,12 @@ def generate_architecture(project_path):
 @click.option("--project", "project_path", type=click.Path())
 def generate_blueprint(project_path):
     project_path, project_data = _load_project(project_path)
+    _emit_progress("generate:blueprint", "Starting generation")
     result = _mutate_project(
         project_path,
         project_data,
         "generate blueprint",
-        lambda p: generation_mod.generate_blueprint(p),
+        lambda p: generation_mod.generate_blueprint(p, progress_callback=_progress_event),
     )
     project_data.setdefault("last_outputs", {}).update(result)
     project_mod.save_project(project_data, project_path)
@@ -609,11 +627,12 @@ def chapter():
 @click.option("--prompt", "custom_prompt")
 def chapter_generate(chapter_number, project_path, custom_prompt):
     project_path, project_data = _load_project(project_path)
+    _emit_progress("chapter:generate", f"Starting chapter {chapter_number}")
     result = _mutate_project(
         project_path,
         project_data,
         f"chapter generate {chapter_number}",
-        lambda p: generation_mod.generate_chapter(p, chapter_number, custom_prompt=custom_prompt),
+        lambda p: generation_mod.generate_chapter(p, chapter_number, custom_prompt=custom_prompt, progress_callback=_progress_event),
     )
     project_data.setdefault("last_outputs", {}).update(result)
     project_mod.save_project(project_data, project_path)
@@ -623,6 +642,7 @@ def chapter_generate(chapter_number, project_path, custom_prompt):
 @click.option("--prompt", "custom_prompt")
 def chapter_batch(start_chapter, end_chapter, project_path, finalize_after_generate, skip_existing, skip_drafts, skip_finalized, clamp_to_blueprint, auto_enrich, min_words, custom_prompt):
     project_path, project_data = _load_project(project_path)
+    _emit_progress("chapter:batch", f"Processing chapters {start_chapter}-{end_chapter}")
     result = _mutate_project(
         project_path,
         project_data,
@@ -639,6 +659,7 @@ def chapter_batch(start_chapter, end_chapter, project_path, finalize_after_gener
             auto_enrich=auto_enrich,
             min_words=min_words,
             custom_prompt=custom_prompt,
+            progress_callback=_progress_event,
         ),
     )
     project_data.setdefault("last_outputs", {})["batch"] = {
@@ -660,6 +681,7 @@ def chapter_batch(start_chapter, end_chapter, project_path, finalize_after_gener
 @click.option("--prompt", "custom_prompt")
 def chapter_continue(end_chapter, project_path, search_start, finalize_after_generate, skip_existing, skip_drafts, skip_finalized, clamp_to_blueprint, auto_enrich, min_words, custom_prompt):
     project_path, project_data = _load_project(project_path)
+    _emit_progress("chapter:continue", f"Searching for resume point from chapter {search_start} to {end_chapter}")
     result = _mutate_project(
         project_path,
         project_data,
@@ -676,6 +698,7 @@ def chapter_continue(end_chapter, project_path, search_start, finalize_after_gen
             auto_enrich=auto_enrich,
             min_words=min_words,
             search_start=search_start,
+            progress_callback=_progress_event,
         ),
     )
     project_data.setdefault("last_outputs", {})["batch_continue"] = {
@@ -693,11 +716,12 @@ def chapter_continue(end_chapter, project_path, search_start, finalize_after_gen
 @click.option("--project", "project_path", type=click.Path())
 def chapter_finalize(chapter_number, project_path):
     project_path, project_data = _load_project(project_path)
+    _emit_progress("chapter:finalize", f"Finalizing chapter {chapter_number}")
     result = _mutate_project(
         project_path,
         project_data,
         f"chapter finalize {chapter_number}",
-        lambda p: generation_mod.finalize_chapter(p, chapter_number),
+        lambda p: generation_mod.finalize_chapter(p, chapter_number, progress_callback=_progress_event),
     )
     project_data.setdefault("last_outputs", {}).update(result)
     project_mod.save_project(project_data, project_path)
@@ -707,11 +731,12 @@ def chapter_finalize(chapter_number, project_path):
 @click.option("--project", "project_path", type=click.Path())
 def chapter_enrich(chapter_number, project_path):
     project_path, project_data = _load_project(project_path)
+    _emit_progress("chapter:enrich", f"Enriching chapter {chapter_number}")
     result = _mutate_project(
         project_path,
         project_data,
         f"chapter enrich {chapter_number}",
-        lambda p: generation_mod.enrich_chapter(p, chapter_number),
+        lambda p: generation_mod.enrich_chapter(p, chapter_number, progress_callback=_progress_event),
     )
     _emit(result, f"Enriched chapter {chapter_number}")
 
@@ -824,7 +849,8 @@ def review():
 @click.option("--project", "project_path", type=click.Path())
 def review_consistency(chapter_number, project_path):
     _, project_data = _load_project(project_path)
-    result = review_mod.review_consistency(project_data, chapter_number)
+    _emit_progress("review:consistency", f"Reviewing chapter {chapter_number}")
+    result = review_mod.review_consistency(project_data, chapter_number, progress_callback=_progress_event)
     _session.add_history(f"review consistency {chapter_number}")
     _emit(result, f"Reviewed chapter {chapter_number}")
 
@@ -843,11 +869,24 @@ def export():
 @click.option("--overwrite", is_flag=True)
 def export_bundle(output_path, project_path, overwrite):
     project_path, project_data = _load_project(project_path)
+    _emit_progress("export:bundle", f"Writing {output_path}")
     result = export_mod.export_bundle(project_data, project_path, output_path, overwrite=overwrite)
     project_data.setdefault("last_outputs", {}).update(result)
     project_mod.save_project(project_data, project_path)
     _session.add_history(f"export bundle {output_path}")
     _emit(result, f"Exported bundle: {output_path}")
+
+
+@click.option("--overwrite", is_flag=True)
+@click.option("--format", "format_name", default="md", type=click.Choice(["md", "txt"], case_sensitive=False))
+def export_manuscript(output_path, project_path, overwrite, format_name):
+    project_path, project_data = _load_project(project_path)
+    _emit_progress("export:manuscript", f"Writing {output_path}")
+    result = export_mod.export_manuscript(project_data, output_path, overwrite=overwrite, format_name=format_name)
+    project_data.setdefault("last_outputs", {}).update(result)
+    project_mod.save_project(project_data, project_path)
+    _session.add_history(f"export manuscript {output_path}")
+    _emit(result, f"Exported manuscript: {output_path}")
 
 
 @cli.group()
@@ -896,7 +935,7 @@ def repl(project_path):
         "workspace show|write": "Inspect or edit core workspace files",
         "chapter generate|batch|continue|finalize|show|write": "Work with chapters",
         "review consistency|plot-arcs": "Check chapter consistency and inspect review context",
-        "export bundle": "Write ZIP bundle",
+        "export bundle|manuscript": "Write ZIP bundle or full manuscript",
         "session status|undo|redo": "Inspect or rewind state",
         "quit": "Exit the REPL",
     }
@@ -1145,6 +1184,7 @@ _register_command(review, "consistency", review_consistency, [_arg("chapter_numb
 _register_command(review, "plot-arcs", review_plot_arcs, [_opt("--project", "project_path", type=click.Path())])
 
 _register_command(export, "bundle", export_bundle, [_arg("output_path", type=click.Path()), _opt("--project", "project_path", type=click.Path()), _opt("--overwrite", is_flag=True)])
+_register_command(export, "manuscript", export_manuscript, [_arg("output_path", type=click.Path()), _opt("--project", "project_path", type=click.Path()), _opt("--overwrite", is_flag=True), _opt("--format", "format_name", default="md", type=click.Choice(["md", "txt"], case_sensitive=False))])
 
 _register_command(session, "use", session_use, [_arg("project_path", type=click.Path(exists=True))])
 _register_command(session, "undo", session_undo, [_opt("--project", "project_path", type=click.Path())])

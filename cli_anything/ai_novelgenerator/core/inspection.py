@@ -5,23 +5,25 @@ import io
 import importlib
 import os
 
+from cli_anything.ai_novelgenerator.core import generation as generation_mod
 from cli_anything.ai_novelgenerator.core import project as project_mod
 from cli_anything.ai_novelgenerator.core import roles as roles_mod
 from cli_anything.ai_novelgenerator.utils.ai_novelgenerator_backend import get_runtime_config, patched_adapters, source_modules
 
 
 def chapter_info(project: dict, chapter_number: int) -> dict:
+    number = generation_mod.validate_chapter_number(project, chapter_number, require_in_blueprint=os.path.exists(os.path.join(project["workspace_dir"], "Novel_directory.txt")))["chapter_number"]
     modules = source_modules(project["source_root"])
     parser = importlib.import_module("chapter_directory_parser")
     blueprint_path = os.path.join(project["workspace_dir"], "Novel_directory.txt")
     blueprint_text = _read_text(blueprint_path)
-    info = parser.get_chapter_info_from_blueprint(blueprint_text, int(chapter_number))
+    info = parser.get_chapter_info_from_blueprint(blueprint_text, number)
     return {
-        "chapter_number": int(chapter_number),
+        "chapter_number": number,
         "blueprint_path": blueprint_path,
         "blueprint_exists": os.path.exists(blueprint_path),
         "chapter_info": info,
-        "recent_chapter_files": _recent_chapter_files(project["workspace_dir"], int(chapter_number)),
+        "recent_chapter_files": _recent_chapter_files(project["workspace_dir"], number),
         "status": project_mod.project_status(project),
         "source_module": modules["chapter_module"].__name__,
     }
@@ -34,7 +36,7 @@ def build_prompt(project: dict, chapter_number: int) -> dict:
     workspace_dir = project["workspace_dir"]
     blueprint_path = os.path.join(workspace_dir, "Novel_directory.txt")
     blueprint_text = _read_text(blueprint_path)
-    number = int(chapter_number)
+    number = generation_mod.validate_chapter_number(project, chapter_number, require_in_blueprint=True)["chapter_number"]
 
     with patched_adapters(project):
         # The source app prints verbose prompt/debug output to stdout.

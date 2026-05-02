@@ -27,7 +27,10 @@ def advanced_split_content(content: str, similarity_threshold: float = 0.7, max_
     """使用基本分段策略"""
     # nltk.download('punkt', quiet=True)
     # nltk.download('punkt_tab', quiet=True)
-    sentences = nltk.sent_tokenize(content)
+    try:
+        sentences = nltk.sent_tokenize(content)
+    except LookupError:
+        sentences = [item.strip() for item in re.split(r'(?<=[。！？.!?])\s+', content) if item.strip()]
     if not sentences:
         return []
 

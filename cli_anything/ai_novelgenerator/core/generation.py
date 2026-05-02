@@ -2,9 +2,10 @@
 
 import contextlib
 import io
+import importlib
 import json
 import os
-import importlib
+import re
 
 from cli_anything.ai_novelgenerator.core import roles as roles_mod
 from cli_anything.ai_novelgenerator.utils.ai_novelgenerator_backend import get_runtime_config, patched_adapters, source_modules
@@ -13,6 +14,12 @@ from cli_anything.ai_novelgenerator.utils.ai_novelgenerator_backend import get_r
 def _quiet_call(fn, *args, **kwargs):
     with contextlib.redirect_stdout(io.StringIO()):
         return fn(*args, **kwargs)
+
+
+def _progress(callback, scope: str, step: str, current: int | None = None, total: int | None = None, **extra):
+    if callback is None:
+        return
+    callback(scope=scope, step=step, current=current, total=total, **extra)
 
 
 def _chapter_path(project: dict, chapter_number: int) -> str:
@@ -67,15 +74,86 @@ def _word_count(project: dict, text: str) -> int:
 
 
 def _blueprint_chapter_numbers(project: dict) -> list[int]:
+    report = validate_blueprint(project, require_complete=False)
+    return report["chapter_numbers"]
+
+
+def validate_blueprint(project: dict, require_complete: bool = True) -> dict:
     blueprint_path = _blueprint_path(project)
     if not os.path.exists(blueprint_path):
-        return []
-    source_modules(project["source_root"])
+        return {
+            "exists": False,
+            "path": blueprint_path,
+            "chapter_numbers": [],
+            "chapter_count": 0,
+            "requires_complete": bool(require_complete),
+        }
+
     with open(blueprint_path, "r", encoding="utf-8") as handle:
         blueprint_text = handle.read()
+
+    source_modules(project["source_root"])
     parser = importlib.import_module("chapter_directory_parser")
     chapters = parser.parse_chapter_blueprint(blueprint_text)
-    return sorted({int(item["chapter_number"]) for item in chapters})
+    configured_total = int(project["parameters"]["num_chapters"])
+    header_numbers = [int(match.group(1)) for match in re.finditer(r"^第\s*(\d+)\s*章\s*-", blueprint_text, re.MULTILINE)]
+    parsed_numbers = [int(item["chapter_number"]) for item in chapters]
+    duplicate_numbers = sorted({number for number in parsed_numbers if parsed_numbers.count(number) > 1})
+    out_of_range_numbers = sorted({number for number in parsed_numbers if number < 1 or number > configured_total})
+    invalid_header_count = max(0, len(header_numbers) - len(parsed_numbers))
+
+    if invalid_header_count:
+        raise RuntimeError(f"Blueprint contains {invalid_header_count} invalid chapter block(s) that could not be parsed strictly.")
+    if duplicate_numbers:
+        raise RuntimeError(f"Blueprint contains duplicate chapter numbers: {', '.join(str(item) for item in duplicate_numbers)}")
+    if out_of_range_numbers:
+        raise RuntimeError(
+            f"Blueprint chapter numbers exceed configured total {configured_total}: {', '.join(str(item) for item in out_of_range_numbers)}"
+        )
+
+    unique_numbers = sorted(set(parsed_numbers))
+    if require_complete:
+        expected_numbers = list(range(1, configured_total + 1))
+        missing_numbers = [number for number in expected_numbers if number not in unique_numbers]
+        if missing_numbers:
+            raise RuntimeError(
+                f"Blueprint must contain every chapter from 1 to {configured_total}. Missing: {', '.join(str(item) for item in missing_numbers)}"
+            )
+        if unique_numbers != expected_numbers:
+            raise RuntimeError("Blueprint chapter numbering must be continuous and ordered from 1 to the configured total.")
+
+    return {
+        "exists": True,
+        "path": blueprint_path,
+        "chapter_numbers": unique_numbers,
+        "chapter_count": len(unique_numbers),
+        "requires_complete": bool(require_complete),
+    }
+
+
+def validate_chapter_number(
+    project: dict,
+    chapter_number: int,
+    require_in_blueprint: bool = False,
+    require_complete_blueprint: bool = False,
+) -> dict:
+    number = int(chapter_number)
+    if number < 1:
+        raise RuntimeError("Chapter numbers must be positive integers.")
+    configured_total = int(project["parameters"]["num_chapters"])
+    if number > configured_total:
+        raise RuntimeError(f"Chapter {number} exceeds configured total chapters: {configured_total}")
+
+    blueprint_report = (
+        validate_blueprint(project, require_complete=require_complete_blueprint) if os.path.exists(_blueprint_path(project)) else None
+    )
+    if require_in_blueprint and blueprint_report and number not in blueprint_report["chapter_numbers"]:
+        raise RuntimeError(f"Chapter {number} is not present in the blueprint.")
+    return {
+        "chapter_number": number,
+        "configured_total": configured_total,
+        "blueprint": blueprint_report,
+    }
 
 
 def _resolve_range(project: dict, start_chapter: int, end_chapter: int, clamp_to_blueprint: bool = False) -> dict:
@@ -129,7 +207,7 @@ def _skip_reason(project: dict, chapter_number: int, skip_drafts: bool, skip_fin
 
 
 def chapter_status(project: dict, chapter_number: int) -> dict:
-    number = int(chapter_number)
+    number = validate_chapter_number(project, chapter_number, require_in_blueprint=False)["chapter_number"]
     has_draft = _chapter_exists(project, number)
     is_finalized = _is_finalized(project, number)
     if is_finalized:
@@ -235,11 +313,13 @@ def next_unfinished_chapter(
     }
 
 
-def generate_architecture(project: dict) -> dict:
+def generate_architecture(project: dict, progress_callback=None) -> dict:
+    _progress(progress_callback, "generate:architecture", "加载运行时配置")
     runtime = get_runtime_config(project)
     modules = source_modules(project["source_root"])
     params = project["parameters"]
     defaults = project["chapter_defaults"]
+    _progress(progress_callback, "generate:architecture", "Calling model")
     with patched_adapters(project):
         _quiet_call(
             modules["novel_generator"].Novel_architecture_generate,
@@ -257,18 +337,22 @@ def generate_architecture(project: dict) -> dict:
             max_tokens=runtime["architecture_llm"]["max_tokens"],
             timeout=runtime["architecture_llm"]["timeout"],
         )
-    return {
+    result = {
         "workspace_dir": project["workspace_dir"],
         "architecture_path": os.path.join(project["workspace_dir"], "Novel_architecture.txt"),
         "character_state_path": os.path.join(project["workspace_dir"], "character_state.txt"),
     }
+    _progress(progress_callback, "generate:architecture", "Completed")
+    return result
 
 
-def generate_blueprint(project: dict) -> dict:
+def generate_blueprint(project: dict, progress_callback=None) -> dict:
+    _progress(progress_callback, "generate:blueprint", "加载运行时配置")
     runtime = get_runtime_config(project)
     modules = source_modules(project["source_root"])
     params = project["parameters"]
     defaults = project["chapter_defaults"]
+    _progress(progress_callback, "generate:blueprint", "Calling model")
     with patched_adapters(project):
         _quiet_call(
             modules["novel_generator"].Chapter_blueprint_generate,
@@ -283,13 +367,20 @@ def generate_blueprint(project: dict) -> dict:
             max_tokens=runtime["chapter_outline_llm"]["max_tokens"],
             timeout=runtime["chapter_outline_llm"]["timeout"],
         )
-    return {
+    result = {
         "workspace_dir": project["workspace_dir"],
         "blueprint_path": os.path.join(project["workspace_dir"], "Novel_directory.txt"),
     }
+    _progress(progress_callback, "generate:blueprint", "Validating blueprint")
+    result["blueprint_validation"] = validate_blueprint(project, require_complete=True)
+    _progress(progress_callback, "generate:blueprint", "Completed")
+    return result
 
 
-def generate_chapter(project: dict, chapter_number: int, custom_prompt: str | None = None) -> dict:
+def generate_chapter(project: dict, chapter_number: int, custom_prompt: str | None = None, progress_callback=None) -> dict:
+    validated = validate_chapter_number(project, chapter_number, require_in_blueprint=True)
+    chapter_number = validated["chapter_number"]
+    _progress(progress_callback, "chapter:generate", f"第 {chapter_number} 章：加载运行时配置")
     runtime = get_runtime_config(project)
     modules = source_modules(project["source_root"])
     params = project["parameters"]
@@ -297,6 +388,7 @@ def generate_chapter(project: dict, chapter_number: int, custom_prompt: str | No
     prompt_text = custom_prompt
     included_roles = []
     if prompt_text is None:
+        _progress(progress_callback, "chapter:generate", f"Chapter {chapter_number}: Building prompt")
         prompt_payload = importlib.import_module("cli_anything.ai_novelgenerator.core.inspection").build_prompt(project, chapter_number)
         prompt_text = prompt_payload["prompt_text"]
         included_roles = prompt_payload.get("included_roles", [])
@@ -305,6 +397,7 @@ def generate_chapter(project: dict, chapter_number: int, custom_prompt: str | No
         prompt_text = injected["prompt_text"]
         included_roles = injected["included_roles"]
 
+    _progress(progress_callback, "chapter:generate", f"Chapter {chapter_number}: Calling model")
     with patched_adapters(project):
         text = _quiet_call(
             modules["novel_generator"].generate_chapter_draft,
@@ -353,7 +446,10 @@ def batch_generate_chapters(
     auto_enrich: bool = False,
     min_words: int | None = None,
     clamp_to_blueprint: bool = False,
+    progress_callback=None,
 ) -> dict:
+    if os.path.exists(_blueprint_path(project)):
+        validate_blueprint(project, require_complete=not clamp_to_blueprint)
     range_info = _resolve_range(project, start_chapter, end_chapter, clamp_to_blueprint=clamp_to_blueprint)
     start = range_info["start_chapter"]
     end = range_info["end_chapter"]
@@ -365,8 +461,11 @@ def batch_generate_chapters(
         raise RuntimeError("Minimum words must be zero or greater.")
 
     results = []
+    total = max(0, end - start + 1)
     for chapter_number in range(start, end + 1):
+        current = chapter_number - start + 1
         chapter_path = _chapter_path(project, chapter_number)
+        _progress(progress_callback, "chapter:batch", f"检查第 {chapter_number} 章", current=current, total=total)
         skip_reason = _skip_reason(
             project,
             chapter_number,
@@ -374,6 +473,8 @@ def batch_generate_chapters(
             skip_finalized=effective_skip_finalized,
         )
         if skip_reason is not None:
+            reason_text = "Skipping finalized chapter" if skip_reason == "skipped_finalized" else "Skipping existing draft chapter"
+            _progress(progress_callback, "chapter:batch", f"{reason_text}：第 {chapter_number} 章", current=current, total=total)
             results.append(
                 {
                     "chapter_number": chapter_number,
@@ -384,7 +485,8 @@ def batch_generate_chapters(
             )
             continue
 
-        draft = generate_chapter(project, chapter_number, custom_prompt=custom_prompt)
+        _progress(progress_callback, "chapter:batch", f"生成第 {chapter_number} 章", current=current, total=total)
+        draft = generate_chapter(project, chapter_number, custom_prompt=custom_prompt, progress_callback=progress_callback)
         chapter_result = {
             "chapter_number": chapter_number,
             "status": "generated",
@@ -394,7 +496,8 @@ def batch_generate_chapters(
             },
         }
         if auto_enrich and draft["word_count"] < int(0.7 * min_words_value):
-            enriched = enrich_chapter(project, chapter_number)
+            _progress(progress_callback, "chapter:batch", f"扩写第 {chapter_number} 章", current=current, total=total)
+            enriched = enrich_chapter(project, chapter_number, progress_callback=progress_callback)
             chapter_result["status"] = "generated_enriched"
             chapter_result["enriched"] = {
                 "chapter_path": enriched["chapter_path"],
@@ -403,7 +506,8 @@ def batch_generate_chapters(
                 "trigger_threshold": 0.7,
             }
         if finalize:
-            finalized = finalize_chapter(project, chapter_number)
+            _progress(progress_callback, "chapter:batch", f"定稿第 {chapter_number} 章", current=current, total=total)
+            finalized = finalize_chapter(project, chapter_number, progress_callback=progress_callback)
             chapter_result["finalized"] = {
                 "chapter_path": finalized["chapter_path"],
                 "global_summary_path": finalized["global_summary_path"],
@@ -411,6 +515,7 @@ def batch_generate_chapters(
                 "vectorstore_dir": finalized["vectorstore_dir"],
             }
         results.append(chapter_result)
+        _progress(progress_callback, "chapter:batch", f"Completed chapter {chapter_number}", current=current, total=total)
 
     return {
         "requested_start_chapter": range_info["requested_start_chapter"],
@@ -448,9 +553,13 @@ def continue_batch_generate_chapters(
     min_words: int | None = None,
     search_start: int = 1,
     clamp_to_blueprint: bool = False,
+    progress_callback=None,
 ) -> dict:
+    if os.path.exists(_blueprint_path(project)):
+        validate_blueprint(project, require_complete=not clamp_to_blueprint)
     effective_skip_drafts = bool(skip_drafts or skip_existing)
     effective_skip_finalized = bool(skip_finalized or skip_existing)
+    _progress(progress_callback, "chapter:continue", "查找续跑起点")
     next_state = next_unfinished_chapter(
         project,
         start_chapter=search_start,
@@ -460,6 +569,7 @@ def continue_batch_generate_chapters(
         clamp_to_blueprint=clamp_to_blueprint,
     )
     if not next_state["found"]:
+        _progress(progress_callback, "chapter:continue", "No resumable chapter found")
         return {
             "resumed": False,
             "reason": "no_unfinished_chapter",
@@ -474,6 +584,7 @@ def continue_batch_generate_chapters(
             "result": None,
         }
 
+    _progress(progress_callback, "chapter:continue", f"Continuing from chapter {next_state['chapter_number']}")
     batch_result = batch_generate_chapters(
         project,
         next_state["chapter_number"],
@@ -486,6 +597,7 @@ def continue_batch_generate_chapters(
         auto_enrich=auto_enrich,
         min_words=min_words,
         clamp_to_blueprint=clamp_to_blueprint,
+        progress_callback=progress_callback,
     )
     return {
         "resumed": True,
@@ -502,10 +614,13 @@ def continue_batch_generate_chapters(
     }
 
 
-def finalize_chapter(project: dict, chapter_number: int) -> dict:
+def finalize_chapter(project: dict, chapter_number: int, progress_callback=None) -> dict:
+    chapter_number = validate_chapter_number(project, chapter_number, require_in_blueprint=True)["chapter_number"]
+    _progress(progress_callback, "chapter:finalize", f"第 {chapter_number} 章：加载运行时配置")
     runtime = get_runtime_config(project)
     modules = source_modules(project["source_root"])
     params = project["parameters"]
+    _progress(progress_callback, "chapter:finalize", f"Chapter {chapter_number}: Calling model")
     with patched_adapters(project):
         _quiet_call(
             modules["novel_generator"].finalize_chapter,
@@ -525,6 +640,7 @@ def finalize_chapter(project: dict, chapter_number: int) -> dict:
             timeout=runtime["final_chapter_llm"]["timeout"],
         )
     chapter_state_path = _mark_finalized(project, chapter_number)
+    _progress(progress_callback, "chapter:finalize", f"Chapter {chapter_number}: Completed")
     return {
         "chapter_number": int(chapter_number),
         "chapter_path": _chapter_path(project, chapter_number),
@@ -535,13 +651,16 @@ def finalize_chapter(project: dict, chapter_number: int) -> dict:
     }
 
 
-def enrich_chapter(project: dict, chapter_number: int) -> dict:
+def enrich_chapter(project: dict, chapter_number: int, progress_callback=None) -> dict:
+    chapter_number = validate_chapter_number(project, chapter_number, require_in_blueprint=True)["chapter_number"]
+    _progress(progress_callback, "chapter:enrich", f"第 {chapter_number} 章：加载运行时配置")
     runtime = get_runtime_config(project)
     modules = source_modules(project["source_root"])
     params = project["parameters"]
     chapter_path = _chapter_path(project, chapter_number)
     with open(chapter_path, "r", encoding="utf-8") as handle:
         text = handle.read()
+    _progress(progress_callback, "chapter:enrich", f"Chapter {chapter_number}: Calling model")
     with patched_adapters(project):
         enriched = _quiet_call(
             modules["novel_generator"].enrich_chapter_text,
@@ -557,6 +676,7 @@ def enrich_chapter(project: dict, chapter_number: int) -> dict:
         )
     with open(chapter_path, "w", encoding="utf-8") as handle:
         handle.write(enriched)
+    _progress(progress_callback, "chapter:enrich", f"Chapter {chapter_number}: Completed")
     return {
         "chapter_number": int(chapter_number),
         "chapter_path": chapter_path,
