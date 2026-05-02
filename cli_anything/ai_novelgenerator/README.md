@@ -2,6 +2,8 @@
 
 Standalone CLI workflow harness for `AI_NovelGenerator`.
 
+This project is based on [AI_NovelGenerator](https://github.com/YILING0013/AI_NovelGenerator).
+
 This package wraps the novel-generation pipeline behind a scriptable command line interface. It is designed for automation, batch workflows, prompt inspection, workspace editing, and deterministic testing.
 
 ## Status

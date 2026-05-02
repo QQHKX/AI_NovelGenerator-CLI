@@ -2,6 +2,8 @@
 
 `AI_NovelGenerator` 的独立命令行版本，面向自动化、无界面工作流、批量生成、提示词检查、工作区编辑和回归测试。
 
+本项目基于 [AI_NovelGenerator](https://github.com/YILING0013/AI_NovelGenerator) 开发。
+
 这个仓库已经是一个可单独发布的 CLI 仓库，不再依赖旁边必须存在的 GUI 项目源码目录。
 
 ## 仓库定位

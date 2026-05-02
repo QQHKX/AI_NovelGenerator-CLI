@@ -1,5 +1,7 @@
 # AI_NovelGenerator Harness SOP
 
+本项目基于 [AI_NovelGenerator](https://github.com/YILING0013/AI_NovelGenerator) 开发。
+
 ## Backend Engine
 
 The GUI in `main.py` is a `customtkinter` shell around source-native Python modules:
