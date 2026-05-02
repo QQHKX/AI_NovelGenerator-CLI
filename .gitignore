@@ -1,0 +1,52 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+.coverage.*
+dist/
+build/
+.venv/
+venv/
+pip-wheel-metadata/
+
+# Runtime logs
+*.log
+
+# Local config and env files
+.env
+.env.*
+
+# Common local project control files
+*.local.json
+demo.json
+project.json
+
+# Common generated exports
+*.zip
+
+# Common CLI workspaces
+demo-work/
+workspace/
+workspaces/
+output/
+outputs/
+artifacts/
+tmp/
+temp/
+
+# Novel workspace outputs
+Novel_architecture.txt
+Novel_directory.txt
+character_state.txt
+global_summary.txt
+partial_architecture.json
+chapter_states.json
+plot_arcs.txt
+vectorstore/
+chapters/
+角色库/
+
+# Scratch docs often created while testing commands
+chapter-*.txt
+roles.txt
